@@ -1,42 +1,69 @@
-const express = require('express');
-const Order = require('../models/Order');
-const { protect, adminOnly, staffOrAdmin } = require('../middleware/auth');
+const express = require("express");
+const Order = require("../models/Order");
+const { protect, adminOnly, staffOrAdmin } = require("../middleware/auth");
+const {
+  sendOrderReadyEmail,
+  getCustomerEmailByPhone,
+} = require("../config/emailService");
 
 const router = express.Router();
 
 router.use(protect);
 
 // GET /api/orders/garment-prices
-router.get('/garment-prices', (req, res) => {
+router.get("/garment-prices", (req, res) => {
   res.json({ success: true, data: Order.GARMENT_PRICES });
 });
 
 // GET /api/orders/dashboard  — admin only
-router.get('/dashboard', adminOnly, async (req, res, next) => {
+router.get("/dashboard", adminOnly, async (req, res, next) => {
   try {
-    const [totalOrders, revenueResult, statusCounts, recentOrders, topGarments] =
-      await Promise.all([
-        Order.countDocuments(),
-        Order.aggregate([{ $group: { _id: null, total: { $sum: '$totalAmount' } } }]),
-        Order.aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]),
-        Order.find()
-          .sort({ createdAt: -1 })
-          .limit(5)
-          .select('orderId customerName totalAmount status createdAt estimatedDelivery actualDelivery'),
-        Order.aggregate([
-          { $unwind: '$garments' },
-          { $group: { _id: '$garments.type', totalQuantity: { $sum: '$garments.quantity' }, totalRevenue: { $sum: '$garments.subtotal' } } },
-          { $sort: { totalQuantity: -1 } },
-          { $limit: 5 },
-        ]),
-      ]);
+    const [
+      totalOrders,
+      revenueResult,
+      statusCounts,
+      recentOrders,
+      topGarments,
+    ] = await Promise.all([
+      Order.countDocuments(),
+      Order.aggregate([
+        { $group: { _id: null, total: { $sum: "$totalAmount" } } },
+      ]),
+      Order.aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }]),
+      Order.find()
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .select(
+          "orderId customerName totalAmount status createdAt estimatedDelivery actualDelivery",
+        ),
+      Order.aggregate([
+        { $unwind: "$garments" },
+        {
+          $group: {
+            _id: "$garments.type",
+            totalQuantity: { $sum: "$garments.quantity" },
+            totalRevenue: { $sum: "$garments.subtotal" },
+          },
+        },
+        { $sort: { totalQuantity: -1 } },
+        { $limit: 5 },
+      ]),
+    ]);
 
     const statusMap = { RECEIVED: 0, PROCESSING: 0, READY: 0, DELIVERED: 0 };
-    statusCounts.forEach(({ _id, count }) => { statusMap[_id] = count; });
+    statusCounts.forEach(({ _id, count }) => {
+      statusMap[_id] = count;
+    });
 
     res.json({
       success: true,
-      data: { totalOrders, totalRevenue: revenueResult[0]?.total || 0, ordersPerStatus: statusMap, recentOrders, topGarments },
+      data: {
+        totalOrders,
+        totalRevenue: revenueResult[0]?.total || 0,
+        ordersPerStatus: statusMap,
+        recentOrders,
+        topGarments,
+      },
     });
   } catch (error) {
     next(error);
@@ -44,32 +71,41 @@ router.get('/dashboard', adminOnly, async (req, res, next) => {
 });
 
 // GET /api/orders/staff-dashboard  — staff (no revenue)
-router.get('/staff-dashboard', staffOrAdmin, async (req, res, next) => {
+router.get("/staff-dashboard", staffOrAdmin, async (req, res, next) => {
   try {
     const [statusCounts, recentOrders] = await Promise.all([
-      Order.aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]),
+      Order.aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }]),
       Order.find()
         .sort({ createdAt: -1 })
         .limit(5)
-        .select('orderId customerName status createdAt estimatedDelivery actualDelivery'),
+        .select(
+          "orderId customerName status createdAt estimatedDelivery actualDelivery",
+        ),
     ]);
 
     const statusMap = { RECEIVED: 0, PROCESSING: 0, READY: 0, DELIVERED: 0 };
-    statusCounts.forEach(({ _id, count }) => { statusMap[_id] = count; });
+    statusCounts.forEach(({ _id, count }) => {
+      statusMap[_id] = count;
+    });
 
-    res.json({ success: true, data: { ordersPerStatus: statusMap, recentOrders } });
+    res.json({
+      success: true,
+      data: { ordersPerStatus: statusMap, recentOrders },
+    });
   } catch (error) {
     next(error);
   }
 });
 
 // GET /api/orders/my-orders  — customer sees own orders
-router.get('/my-orders', async (req, res, next) => {
+router.get("/my-orders", async (req, res, next) => {
   try {
-    if (req.user.role !== 'customer') {
-      return res.status(403).json({ success: false, message: 'Customer only' });
+    if (req.user.role !== "customer") {
+      return res.status(403).json({ success: false, message: "Customer only" });
     }
-    const orders = await Order.find({ phoneNumber: req.user.phone }).sort({ createdAt: -1 });
+    const orders = await Order.find({ phoneNumber: req.user.phone }).sort({
+      createdAt: -1,
+    });
     res.json({ success: true, data: { orders } });
   } catch (error) {
     next(error);
@@ -77,7 +113,7 @@ router.get('/my-orders', async (req, res, next) => {
 });
 
 // GET /api/orders  — list all (staff + admin)
-router.get('/', staffOrAdmin, async (req, res, next) => {
+router.get("/", staffOrAdmin, async (req, res, next) => {
   try {
     const { status, search, garmentType, page = 1, limit = 10 } = req.query;
     const query = {};
@@ -85,12 +121,12 @@ router.get('/', staffOrAdmin, async (req, res, next) => {
     if (status) query.status = status.toUpperCase();
     if (search) {
       query.$or = [
-        { customerName: { $regex: search, $options: 'i' } },
-        { phoneNumber: { $regex: search, $options: 'i' } },
-        { orderId: { $regex: search, $options: 'i' } },
+        { customerName: { $regex: search, $options: "i" } },
+        { phoneNumber: { $regex: search, $options: "i" } },
+        { orderId: { $regex: search, $options: "i" } },
       ];
     }
-    if (garmentType) query['garments.type'] = garmentType;
+    if (garmentType) query["garments.type"] = garmentType;
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
     const [orders, total] = await Promise.all([
@@ -98,13 +134,21 @@ router.get('/', staffOrAdmin, async (req, res, next) => {
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(parseInt(limit))
-        .populate('createdBy', 'name email role'),
+        .populate("createdBy", "name email role"),
       Order.countDocuments(query),
     ]);
 
     res.json({
       success: true,
-      data: { orders, pagination: { total, page: parseInt(page), pages: Math.ceil(total / parseInt(limit)), limit: parseInt(limit) } },
+      data: {
+        orders,
+        pagination: {
+          total,
+          page: parseInt(page),
+          pages: Math.ceil(total / parseInt(limit)),
+          limit: parseInt(limit),
+        },
+      },
     });
   } catch (error) {
     next(error);
@@ -112,47 +156,67 @@ router.get('/', staffOrAdmin, async (req, res, next) => {
 });
 
 // POST /api/orders  — create (staff + admin)
-router.post('/', staffOrAdmin, async (req, res, next) => {
+router.post("/", staffOrAdmin, async (req, res, next) => {
   try {
-    const { customerName, phoneNumber, garments, specialInstructions } = req.body;
+    const { customerName, phoneNumber, garments, specialInstructions } =
+      req.body;
 
     if (!garments || garments.length === 0) {
-      return res.status(400).json({ success: false, message: 'At least one garment required' });
+      return res
+        .status(400)
+        .json({ success: false, message: "At least one garment required" });
     }
 
     const PRICES = Order.GARMENT_PRICES;
     const processedGarments = garments.map((g) => {
       const pricePerItem = PRICES[g.type];
-      if (!pricePerItem) throw { statusCode: 400, message: `Unknown garment type: ${g.type}` };
-      return { type: g.type, quantity: g.quantity, pricePerItem, subtotal: pricePerItem * g.quantity };
+      if (!pricePerItem)
+        throw { statusCode: 400, message: `Unknown garment type: ${g.type}` };
+      return {
+        type: g.type,
+        quantity: g.quantity,
+        pricePerItem,
+        subtotal: pricePerItem * g.quantity,
+      };
     });
 
     const totalAmount = processedGarments.reduce((s, g) => s + g.subtotal, 0);
     const customerId = await Order.linkCustomer(phoneNumber);
 
     const order = await Order.create({
-      customerName, phoneNumber, customerId,
-      garments: processedGarments, totalAmount,
-      specialInstructions, createdBy: req.user._id,
+      customerName,
+      phoneNumber,
+      customerId,
+      garments: processedGarments,
+      totalAmount,
+      specialInstructions,
+      createdBy: req.user._id,
     });
 
-    res.status(201).json({ success: true, message: 'Order created successfully', data: { order } });
+    res.status(201).json({
+      success: true,
+      message: "Order created successfully",
+      data: { order },
+    });
   } catch (error) {
     next(error);
   }
 });
 
 // GET /api/orders/:id
-router.get('/:id', async (req, res, next) => {
+router.get("/:id", async (req, res, next) => {
   try {
     const order = await Order.findOne({
       $or: [{ _id: req.params.id }, { orderId: req.params.id }],
-    }).populate('createdBy', 'name email role');
+    }).populate("createdBy", "name email role");
 
-    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    if (!order)
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
 
-    if (req.user.role === 'customer' && order.phoneNumber !== req.user.phone) {
-      return res.status(403).json({ success: false, message: 'Access denied' });
+    if (req.user.role === "customer" && order.phoneNumber !== req.user.phone) {
+      return res.status(403).json({ success: false, message: "Access denied" });
     }
 
     res.json({ success: true, data: { order } });
@@ -161,18 +225,19 @@ router.get('/:id', async (req, res, next) => {
   }
 });
 
-// ✅ FIXED: PATCH /api/orders/:id/status
+// ✅ UPDATED: PATCH /api/orders/:id/status
+// - When READY: send email notification to customer
 // - When DELIVERED: set actualDelivery = now, clear estimatedDelivery
 // - When any other status: just update status
-router.patch('/:id/status', staffOrAdmin, async (req, res, next) => {
+router.patch("/:id/status", staffOrAdmin, async (req, res, next) => {
   try {
     const { status, note } = req.body;
-    const validStatuses = ['RECEIVED', 'PROCESSING', 'READY', 'DELIVERED'];
+    const validStatuses = ["RECEIVED", "PROCESSING", "READY", "DELIVERED"];
 
     if (!validStatuses.includes(status?.toUpperCase())) {
       return res.status(400).json({
         success: false,
-        message: `Status must be one of: ${validStatuses.join(', ')}`,
+        message: `Status must be one of: ${validStatuses.join(", ")}`,
       });
     }
 
@@ -180,15 +245,19 @@ router.patch('/:id/status', staffOrAdmin, async (req, res, next) => {
       $or: [{ _id: req.params.id }, { orderId: req.params.id }],
     });
 
-    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    if (!order)
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
 
     const newStatus = status.toUpperCase();
+    const oldStatus = order.status;
     order.status = newStatus;
 
-    // ✅ FIX: When delivered, record actual delivery time
-    if (newStatus === 'DELIVERED') {
-      order.actualDelivery = new Date();        // actual delivery timestamp
-      order.estimatedDelivery = null;           // clear estimated — it's done
+    // ✅ When delivered, record actual delivery time
+    if (newStatus === "DELIVERED") {
+      order.actualDelivery = new Date(); // actual delivery timestamp
+      order.estimatedDelivery = null; // clear estimated — it's done
     }
 
     order.statusHistory.push({
@@ -198,6 +267,30 @@ router.patch('/:id/status', staffOrAdmin, async (req, res, next) => {
     });
 
     await order.save();
+
+    // ✅ NEW: Send email notification when status becomes READY
+    if (newStatus === "READY" && oldStatus !== "READY") {
+      // Get customer email and send notification
+      const customerEmail = await getCustomerEmailByPhone(order.phoneNumber);
+
+      if (customerEmail) {
+        // Send email asynchronously (don't wait for it)
+        sendOrderReadyEmail(customerEmail, order.customerName, order.orderId, {
+          garments: order.garments,
+          totalAmount: order.totalAmount,
+          estimatedDelivery: order.estimatedDelivery,
+        }).catch((err) => {
+          console.error(
+            `Failed to send order ready email for ${order.orderId}:`,
+            err,
+          );
+        });
+      } else {
+        console.warn(
+          `No email found for customer ${order.phoneNumber} (Order: ${order.orderId})`,
+        );
+      }
+    }
 
     res.json({
       success: true,
@@ -210,13 +303,16 @@ router.patch('/:id/status', staffOrAdmin, async (req, res, next) => {
 });
 
 // DELETE /api/orders/:id  — admin only
-router.delete('/:id', adminOnly, async (req, res, next) => {
+router.delete("/:id", adminOnly, async (req, res, next) => {
   try {
     const order = await Order.findOneAndDelete({
       $or: [{ _id: req.params.id }, { orderId: req.params.id }],
     });
-    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    res.json({ success: true, message: 'Order deleted' });
+    if (!order)
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
+    res.json({ success: true, message: "Order deleted" });
   } catch (error) {
     next(error);
   }
